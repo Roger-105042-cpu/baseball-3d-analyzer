@@ -1,0 +1,4 @@
+echo .venv/ > .gitignore
+echo *.mp4 >> .gitignore
+git add script77.py requirements.txt .gitignore
+git commit -m "Deploy clean 3D baseball app files"
