@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 streamlit
 opencv-python-headless
 mediapipe
@@ -6,12 +5,3 @@ numpy
 plotly
 google-genai
 pydantic
-=======
-streamlit
-opencv-python-headless
-mediapipe
-numpy
-plotly
-google-genai
-pydantic
->>>>>>> 5664e6cb (Initial commit)
