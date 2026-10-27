@@ -1,5 +1,5 @@
 """
-棒球 3D 生物力學與 AI 診斷系統 (單次 & 多次揮棒 3D 建模版)
+棒球 3D 生物力學與 AI 診斷系統 (依據棒頭軌跡繪製 3D 揮棒扇形面版)
 執行方式: streamlit run script77.py
 """
 import json
@@ -22,6 +22,7 @@ st.set_page_config(page_title="棒球 3D 生物力學診斷系統", page_icon="�
 try:
     from google import genai
     from google.genai import types
+
     HAS_GENAI = True
 except Exception:
     HAS_GENAI = False
@@ -211,10 +212,12 @@ def segment_swings(metrics_data, fps, window_sec=1.0):
                 peak_indices.append(i)
 
     if not peak_indices:
-        return [{"name": "🌐 全景整段影片 (全揮棒)", "start_idx": 0, "end_idx": len(times) - 1, "peak_idx": int(np.argmax(speeds))}]
+        return [{"name": "🌐 全景整段影片 (全揮棒)", "start_idx": 0, "end_idx": len(times) - 1,
+                 "peak_idx": int(np.argmax(speeds))}]
 
     window_frames = int(window_sec * fps)
-    swings = [{"name": "🌐 全景整段影片 (含多次揮棒)", "start_idx": 0, "end_idx": len(times) - 1, "peak_idx": int(np.argmax(speeds))}]
+    swings = [{"name": "🌐 全景整段影片 (含多次揮棒)", "start_idx": 0, "end_idx": len(times) - 1,
+               "peak_idx": int(np.argmax(speeds))}]
 
     for idx, p_idx in enumerate(peak_indices):
         start_idx = max(0, p_idx - int(window_frames * 0.4))
@@ -238,11 +241,13 @@ def make_metrics_chart(metrics_data):
         subplot_titles=("髖肩分離度 (X-Factor Sequence)", "追蹤關節 3D 移動速度 (Speed MPH)")
     )
     fig.add_trace(
-        go.Scatter(x=metrics_data["time_sec"], y=metrics_data["x_factors"], mode="lines+markers", name="X-Factor (°)", line=dict(color="#00d8d6", width=3)),
+        go.Scatter(x=metrics_data["time_sec"], y=metrics_data["x_factors"], mode="lines+markers", name="X-Factor (°)",
+                   line=dict(color="#00d8d6", width=3)),
         row=1, col=1
     )
     fig.add_trace(
-        go.Scatter(x=metrics_data["time_sec"], y=metrics_data["speeds_mph"], mode="lines+markers", name="速度 (mph)", line=dict(color="#ffdd59", width=3)),
+        go.Scatter(x=metrics_data["time_sec"], y=metrics_data["speeds_mph"], mode="lines+markers", name="速度 (mph)",
+                   line=dict(color="#ffdd59", width=3)),
         row=2, col=1
     )
     fig.update_layout(
@@ -255,7 +260,7 @@ def make_metrics_chart(metrics_data):
     return fig
 
 
-# ─── 繪製 3D 骨架與球棒揮擊扇形面 (Bat Swept Surface) ───────────────
+# ─── 依據「棒頭軌跡」繪製 3D 骨架與球棒揮擊扇形面 (Bat Tip Swept Surface) ───
 def make_3d_figure(records, poses_rel, tracked_joint, animation_limit=240, bat_length=0.85):
     stride = max(1, int(np.ceil(len(records) / animation_limit)))
     anim_records = records[::stride]
@@ -267,42 +272,80 @@ def make_3d_figure(records, poses_rel, tracked_joint, animation_limit=240, bat_l
     wrist_traj = poses_rel[:, wrist_idx, :]
     elbow_traj = poses_rel[:, elbow_idx, :]
 
+    # 1. 計算球棒指向向量與「棒頭 (Bat Tip)」3D 軌跡
     bat_vecs = wrist_traj - elbow_traj
     bat_vecs = bat_vecs / (np.linalg.norm(bat_vecs, axis=1, keepdims=True) + 1e-6)
-    tip_traj = wrist_traj + bat_vecs * bat_length
+    tip_traj = wrist_traj + bat_vecs * bat_length  # 棒頭 3D 座標
 
-    num_frames = len(wrist_traj)
-    num_segments = 10
+    # 2. 以雙肩中點作為揮棒旋轉樞紐圓心 (Rotation Hub Center)
+    shoulder_centers = (poses_rel[:, 11, :] + poses_rel[:, 12, :]) / 2
+
+    # 3. 建構依據棒頭軌跡形成的 3D 扇形網格 (從旋轉圓心拉至棒頭軌跡)
+    num_frames = len(tip_traj)
+    num_segments = 12  # 扇形面徑向分割數
     s = np.linspace(0, 1, num_segments)
+
     surf_X = np.zeros((num_frames, num_segments))
     surf_Y = np.zeros((num_frames, num_segments))
     surf_Z = np.zeros((num_frames, num_segments))
 
     for t in range(num_frames):
+        hub_pt = shoulder_centers[t]  # 當前影格旋轉樞紐
+        tip_pt = tip_traj[t]  # 當前影格棒頭座標
         for idx_s, val_s in enumerate(s):
-            pt = (1 - val_s) * wrist_traj[t] + val_s * tip_traj[t]
+            pt = (1 - val_s) * hub_pt + val_s * tip_pt
             surf_X[t, idx_s] = pt[0]
             surf_Y[t, idx_s] = pt[1]
             surf_Z[t, idx_s] = pt[2]
 
+    # 4. 計算棒頭移動速度作為扇形面色彩漸層 (Viridis)
+    dt = 1.0 / 30.0
+    tip_vel = np.diff(tip_traj, axis=0) / dt
+    tip_speeds = np.linalg.norm(tip_vel, axis=1)
+    tip_speeds = np.insert(tip_speeds, 0, tip_speeds[0])  # 補齊第一影格
+    surface_color = np.tile(tip_speeds[:, None], (1, num_segments))
+
     fig = go.Figure()
 
-    # 3D 半透明揮棒扇形面
+    # (A) 繪製完全依據「棒頭軌跡」產生的半透明 3D 揮棒扇形面
     fig.add_trace(go.Surface(
         x=surf_X, y=surf_Y, z=surf_Z,
-        colorscale="Viridis", opacity=0.6, showscale=False, name="揮棒軌跡扇形面"
+        surfacecolor=surface_color,
+        colorscale="Viridis", opacity=0.65, showscale=True,
+        colorbar=dict(title="棒頭速度 (m/s)", x=1.05),
+        name="棒頭揮棒扇形面"
     ))
-    fig.add_trace(go.Scatter3d(x=wrist_traj[:, 0], y=wrist_traj[:, 1], z=wrist_traj[:, 2], mode="lines", line=dict(color="#00d8d6", width=3), name="手腕軌跡"))
-    fig.add_trace(go.Scatter3d(x=tip_traj[:, 0], y=tip_traj[:, 1], z=tip_traj[:, 2], mode="lines", line=dict(color="#ffdd59", width=4), name="棒頭軌跡 (扇形外緣)"))
 
+    # (B) 繪製棒頭 3D 軌跡外廓強調線 (Bat Tip Path)
+    fig.add_trace(go.Scatter3d(
+        x=tip_traj[:, 0], y=tip_traj[:, 1], z=tip_traj[:, 2],
+        mode="lines", line=dict(color="#ffdd59", width=6),
+        name="棒頭 3D 揮擊軌跡"
+    ))
+
+    # (C) 繪製手腕軌跡參考線
+    fig.add_trace(go.Scatter3d(
+        x=wrist_traj[:, 0], y=wrist_traj[:, 1], z=wrist_traj[:, 2],
+        mode="lines", line=dict(color="#00d8d6", width=2, dash="dot"),
+        name="手腕軌跡"
+    ))
+
+    # (D) 初始影格骨架繪製
     init_pose = anim_poses[0]
     init_joints = init_pose[JOINTS]
-    fig.add_trace(go.Scatter3d(x=init_joints[:, 0], y=init_joints[:, 1], z=init_joints[:, 2], mode="markers", marker=dict(size=5, color="#ff5e57"), name="關節點"))
+    fig.add_trace(go.Scatter3d(
+        x=init_joints[:, 0], y=init_joints[:, 1], z=init_joints[:, 2],
+        mode="markers", marker=dict(size=5, color="#ff5e57"), name="關節點"
+    ))
 
     for p1_idx, p2_idx in BONES:
         p1, p2 = init_pose[p1_idx], init_pose[p2_idx]
-        fig.add_trace(go.Scatter3d(x=[p1[0], p2[0]], y=[p1[1], p2[1]], z=[p1[2], p2[2]], mode="lines", line=dict(color="#ffffff", width=4), showlegend=False))
+        fig.add_trace(go.Scatter3d(
+            x=[p1[0], p2[0]], y=[p1[1], p2[1]], z=[p1[2], p2[2]],
+            mode="lines", line=dict(color="#ffffff", width=4), showlegend=False
+        ))
 
+    # 5. 建立動畫播放影格 (Animation Frames)
     anim_frames = []
     anim_wrist = wrist_traj[::stride]
     anim_tip = tip_traj[::stride]
@@ -313,15 +356,23 @@ def make_3d_figure(records, poses_rel, tracked_joint, animation_limit=240, bat_l
         t_pt = anim_tip[idx]
 
         frame_traces = [
-            go.Surface(x=surf_X, y=surf_Y, z=surf_Z, colorscale="Viridis", opacity=0.6, showscale=False),
-            go.Scatter3d(x=wrist_traj[:, 0], y=wrist_traj[:, 1], z=wrist_traj[:, 2], mode="lines", line=dict(color="#00d8d6", width=3)),
-            go.Scatter3d(x=tip_traj[:, 0], y=tip_traj[:, 1], z=tip_traj[:, 2], mode="lines", line=dict(color="#ffdd59", width=4)),
-            go.Scatter3d(x=curr_joints[:, 0], y=curr_joints[:, 1], z=curr_joints[:, 2], mode="markers", marker=dict(size=6, color="#ff3838")),
-            go.Scatter3d(x=[w_pt[0], t_pt[0]], y=[w_pt[1], t_pt[1]], z=[w_pt[2], t_pt[2]], mode="lines", line=dict(color="#ffdd59", width=8))
+            # 保持棒頭扇形面、棒頭軌跡、手腕軌跡
+            go.Surface(x=surf_X, y=surf_Y, z=surf_Z, surfacecolor=surface_color, colorscale="Viridis", opacity=0.65,
+                       showscale=False),
+            go.Scatter3d(x=tip_traj[:, 0], y=tip_traj[:, 1], z=tip_traj[:, 2], mode="lines",
+                         line=dict(color="#ffdd59", width=6)),
+            go.Scatter3d(x=wrist_traj[:, 0], y=wrist_traj[:, 1], z=wrist_traj[:, 2], mode="lines",
+                         line=dict(color="#00d8d6", width=2, dash="dot")),
+            # 當前影格骨架與亮黃色實體球棒 (棒頭點至手腕點)
+            go.Scatter3d(x=curr_joints[:, 0], y=curr_joints[:, 1], z=curr_joints[:, 2], mode="markers",
+                         marker=dict(size=6, color="#ff3838")),
+            go.Scatter3d(x=[w_pt[0], t_pt[0]], y=[w_pt[1], t_pt[1]], z=[w_pt[2], t_pt[2]], mode="lines",
+                         line=dict(color="#ffdd59", width=9))
         ]
         for p1_idx, p2_idx in BONES:
             p1, p2 = pose_pts[p1_idx], pose_pts[p2_idx]
-            frame_traces.append(go.Scatter3d(x=[p1[0], p2[0]], y=[p1[1], p2[1]], z=[p1[2], p2[2]], mode="lines", line=dict(color="#ffffff", width=4)))
+            frame_traces.append(go.Scatter3d(x=[p1[0], p2[0]], y=[p1[1], p2[1]], z=[p1[2], p2[2]], mode="lines",
+                                             line=dict(color="#ffffff", width=4)))
 
         anim_frames.append(go.Frame(data=frame_traces, name=f"f_{idx}"))
 
@@ -336,8 +387,10 @@ def make_3d_figure(records, poses_rel, tracked_joint, animation_limit=240, bat_l
         ),
         margin=dict(l=0, r=0, b=0, t=30), height=600,
         updatemenus=[dict(type="buttons", showactive=False, y=0.05, x=0.05, buttons=[
-            dict(label="▶ 播放 3D 揮棒", method="animate", args=[None, dict(frame=dict(duration=40, redraw=True), fromcurrent=True)]),
-            dict(label="⏸ 暫停", method="animate", args=[[None], dict(frame=dict(duration=0, redraw=False), mode="immediate")])
+            dict(label="▶ 播放棒頭 3D 揮棒扇形", method="animate",
+                 args=[None, dict(frame=dict(duration=40, redraw=True), fromcurrent=True)]),
+            dict(label="⏸ 暫停", method="animate",
+                 args=[[None], dict(frame=dict(duration=0, redraw=False), mode="immediate")])
         ])]
     )
     return fig
@@ -394,10 +447,11 @@ def generate_gemini_report(metrics_data) -> BaseballAnalysisReport:
 
 # ─── Streamlit 主 UI 介面 ───────────────────────────────────────────
 st.title("⚾ 棒球 3D 生物力學與 AI 診斷系統")
-st.markdown("結合 MediaPipe 3D 世界座標、 Kinematic 曲線分析、單次/多次 3D 揮棒建模與 Gemini AI 診斷引擎。")
+st.markdown("結合 MediaPipe 3D 世界座標、 Kinematic 曲線分析、棒頭 3D 揮棒扇形面與 Gemini AI 診斷引擎。")
 
 st.sidebar.header("⚙️ 分析參數設定")
-tracked_joint_name = st.sidebar.selectbox("選擇追蹤關節", options=["右手腕 (16)", "左手腕 (15)", "右肘 (14)", "左肘 (13)"], index=0)
+tracked_joint_name = st.sidebar.selectbox("選擇追蹤關節",
+                                          options=["右手腕 (16)", "左手腕 (15)", "右肘 (14)", "左肘 (13)"], index=0)
 joint_map = {"右手腕 (16)": 16, "左手腕 (15)": 15, "右肘 (14)": 14, "左肘 (13)": 13}
 tracked_joint = joint_map[tracked_joint_name]
 
@@ -423,7 +477,7 @@ if uploaded_file is not None:
 
                 # 切割揮棒動作選單
                 swings = segment_swings(metrics_data, fps)
-                st.subheader("🧊 3D 姿勢與揮棒軌跡建模")
+                st.subheader("🧊 3D 姿勢與棒頭軌跡扇形面建模")
 
                 selected_swing_name = st.selectbox(
                     "🎯 選擇 3D 建模視角 (支援單次揮棒與全景多次揮棒)：",
