@@ -199,7 +199,6 @@ def compute_biomechanics_timeline(records, fps, tracked_joint):
     }
     return metrics_data, poses_rel
 
-
 # ─── 6. 繪製生物力學折線圖 ─────────────────────────────────────────
 def make_metrics_chart(metrics_data):
     fig = make_subplots(
@@ -235,4 +234,13 @@ def make_metrics_chart(metrics_data):
     fig.update_layout(
         paper_bgcolor="#1e272e",
         plot_bgcolor="#2d3436",
-        font=dict
+        font=dict(color="#ffffff"),
+        height=400,
+        margin=dict(l=20, r=20, t=40, b=20),
+        showlegend=False
+    )
+    fig.update_xaxes(title_text="時間 (秒)", gridcolor="#485460", row=2, col=1)
+    fig.update_yaxes(title_text="角度 (°)", gridcolor="#485460", row=1, col=1)
+    fig.update_yaxes(title_text="速度 (mph)", gridcolor="#485460", row=2, col=1)
+
+    return fig
