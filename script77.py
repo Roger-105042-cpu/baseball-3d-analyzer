@@ -343,22 +343,25 @@ def make_3d_figure(records, poses_rel, tracked_joint, animation_limit=240, bat_l
     return fig
 
 
-# ─── Gemini AI 診斷生成 ───────────────────────────────────────────
+# ─── Gemini AI 診斷生成 (穩定防錯版) ───────────────────────────────────
 def generate_gemini_report(metrics_data) -> BaseballAnalysisReport:
     if not HAS_GENAI:
-        raise RuntimeError("系統未能正確載入 google-genai 套件。")
-        # 1. 優先從 Streamlit Secrets 或環境變數讀取 Key
-        api_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+        raise RuntimeError("系統未能正確載入 google-genai 套件，請確認 requirements.txt。")
 
-        # 2. 清除金鑰前後可能多複製到的空白或換行
-        if api_key:
-            api_key = str(api_key).strip()
+    # 1. 從 Streamlit Secrets 或環境變數讀取 API Key
+    api_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
 
-        if not api_key:
-            raise ValueError("未檢測到 GEMINI_API_KEY！請至 Streamlit Cloud 的 Settings -> Secrets 填入有效的 API Key。")
+    if api_key:
+        api_key = str(api_key).strip()
 
-        # 3. 初始化官方 Client (明確指定 api_key 參數)
+    if not api_key:
+        raise ValueError("未偵測到 GEMINI_API_KEY！請至 Streamlit Cloud 的 Settings -> Secrets 填入有效的 API Key。")
+
+    # 2. 明確初始化 client 變數（避免 UnboundLocalError）
+    try:
         client = genai.Client(api_key=api_key)
+    except Exception as init_err:
+        raise RuntimeError(f"Gemini Client 初始化失敗：{init_err}")
 
     system_instruction = """
   你是一位 MLB 級別的棒球生物力學專家與教練。
@@ -375,6 +378,7 @@ def generate_gemini_report(metrics_data) -> BaseballAnalysisReport:
 
     prompt = f"請分析以下棒球運動生物力學數據並生成報告：\n```json\n{json.dumps(prompt_payload, indent=2)}\n```"
 
+    # 3. 呼叫 Gemini 3.8 Flash 模型
     response = client.models.generate_content(
         model="gemini-3.8-flash",
         contents=prompt,
