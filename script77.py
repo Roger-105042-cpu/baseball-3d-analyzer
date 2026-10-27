@@ -14,11 +14,17 @@ from plotly.subplots import make_subplots
 from pydantic import BaseModel, Field
 import streamlit as st
 
-# Google GenAI 套件
-from google import genai
-from google.genai import types
-
+# 確保 set_page_config 是第一個 Streamlit 命令
 st.set_page_config(page_title="棒球 3D 生物力學診斷系統", page_icon="⚾", layout="wide")
+
+# Google GenAI 套件
+try:
+    from google import genai
+    from google.genai import types
+
+    HAS_GENAI = True
+except Exception as e:
+    HAS_GENAI = False
 
 BONES = [
     (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),
@@ -77,7 +83,6 @@ def calculate_x_factor(pts):
     hip_vec = pts[24] - pts[23]  # 右髖 - 左髖
     shoulder_vec = pts[12] - pts[11]  # 右肩 - 左肩
 
-    # 投影到 XY 水平平面
     hip_vec_2d = hip_vec[[0, 1]]
     shoulder_vec_2d = shoulder_vec[[0, 1]]
 
@@ -172,19 +177,14 @@ def compute_biomechanics_timeline(records, fps, tracked_joint):
     hip_centers = (poses[:, 23, :] + poses[:, 24, :]) / 2
     poses_rel = poses - hip_centers[:, None, :]
 
-    # 1. 計算 X-Factor 時間序列
     x_factors = [calculate_x_factor(pts) for pts in poses]
-
-    # 2. 計算前膝支撐角度 (以左膝/右膝為例，取右腳24-26-28與左腳23-25-27)
     knee_angles = [calculate_angle_3d(pts[23], pts[25], pts[27]) for pts in poses]
 
-    # 3. 計算指定關節 (如手腕) 的 3D 移動速度 (m/s)
     traj = poses_rel[:, tracked_joint, :]
     vel_vectors = np.diff(traj, axis=0) / dt
     speeds = np.linalg.norm(vel_vectors, axis=1)
-    speeds = np.insert(speeds, 0, 0.0)  # 第一格補零
+    speeds = np.insert(speeds, 0, 0.0)
 
-    # 轉換為 mph (1 m/s ≈ 2.23694 mph)
     speeds_mph = speeds * 2.23694
 
     metrics_data = {
@@ -199,6 +199,7 @@ def compute_biomechanics_timeline(records, fps, tracked_joint):
     }
     return metrics_data, poses_rel
 
+
 # ─── 6. 繪製生物力學折線圖 ─────────────────────────────────────────
 def make_metrics_chart(metrics_data):
     fig = make_subplots(
@@ -207,7 +208,6 @@ def make_metrics_chart(metrics_data):
         subplot_titles=("髖肩分離度 (X-Factor Sequence)", "追蹤關節 3D 移動速度 (Wrist/Elbow Speed)")
     )
 
-    # X-Factor 軌跡
     fig.add_trace(
         go.Scatter(
             x=metrics_data["time_sec"],
@@ -219,7 +219,6 @@ def make_metrics_chart(metrics_data):
         row=1, col=1
     )
 
-    # 速度軌跡
     fig.add_trace(
         go.Scatter(
             x=metrics_data["time_sec"],
@@ -244,3 +243,189 @@ def make_metrics_chart(metrics_data):
     fig.update_yaxes(title_text="速度 (mph)", gridcolor="#485460", row=2, col=1)
 
     return fig
+
+
+# ─── 7. 3D 骨架與軌跡圖表 ──────────────────────────────────────────
+def make_3d_figure(records, poses_rel, tracked_joint, animation_limit=240):
+    stride = max(1, int(np.ceil(len(records) / animation_limit)))
+    anim_records = records[::stride]
+    anim_poses = poses_rel[::stride]
+    trajectory = poses_rel[:, tracked_joint, :]
+    anim_trajectory = trajectory[::stride]
+
+    fig = go.Figure()
+    init_pose = anim_poses[0]
+
+    fig.add_trace(go.Scatter3d(
+        x=trajectory[:, 0], y=trajectory[:, 1], z=trajectory[:, 2],
+        mode="lines", line=dict(color="#00d8d6", width=4, dash="dash"),
+        name="完整空間軌跡"
+    ))
+
+    init_joints = init_pose[JOINTS]
+    fig.add_trace(go.Scatter3d(
+        x=init_joints[:, 0], y=init_joints[:, 1], z=init_joints[:, 2],
+        mode="markers", marker=dict(size=5, color="#ff5e57"), name="關節點"
+    ))
+
+    for p1_idx, p2_idx in BONES:
+        p1, p2 = init_pose[p1_idx], init_pose[p2_idx]
+        fig.add_trace(go.Scatter3d(
+            x=[p1[0], p2[0]], y=[p1[1], p2[1]], z=[p1[2], p2[2]],
+            mode="lines", line=dict(color="#ffffff", width=4), showlegend=False
+        ))
+
+    anim_frames = []
+    for idx, (frame_data, pose_pts) in enumerate(zip(anim_records, anim_poses)):
+        curr_traj = anim_trajectory[: idx + 1]
+        curr_joints = pose_pts[JOINTS]
+
+        frame_traces = [
+            go.Scatter3d(x=curr_traj[:, 0], y=curr_traj[:, 1], z=curr_traj[:, 2], mode="lines",
+                         line=dict(color="#00d8d6", width=6)),
+            go.Scatter3d(x=curr_joints[:, 0], y=curr_joints[:, 1], z=curr_joints[:, 2], mode="markers",
+                         marker=dict(size=6, color="#ff3838"))
+        ]
+        for p1_idx, p2_idx in BONES:
+            p1, p2 = pose_pts[p1_idx], pose_pts[p2_idx]
+            frame_traces.append(go.Scatter3d(x=[p1[0], p2[0]], y=[p1[1], p2[1]], z=[p1[2], p2[2]], mode="lines",
+                                             line=dict(color="#ffffff", width=4)))
+
+        anim_frames.append(go.Frame(data=frame_traces, name=f"f_{idx}"))
+
+    fig.frames = anim_frames
+    fig.update_layout(
+        paper_bgcolor="#1e272e", plot_bgcolor="#1e272e", font=dict(color="#ffffff"),
+        scene=dict(
+            xaxis=dict(title="左右 (X)", backgroundcolor="#2d3436", gridcolor="#485460"),
+            yaxis=dict(title="前後 (Y)", backgroundcolor="#2d3436", gridcolor="#485460"),
+            zaxis=dict(title="高度 (Z)", backgroundcolor="#2d3436", gridcolor="#485460"),
+            aspectmode="data", camera=dict(eye=dict(x=1.5, y=-1.5, z=0.8))
+        ),
+        margin=dict(l=0, r=0, b=0, t=30), height=550,
+        updatemenus=[dict(type="buttons", showactive=False, y=0.05, x=0.05, buttons=[
+            dict(label="▶ 播放 3D 動作", method="animate",
+                 args=[None, dict(frame=dict(duration=40, redraw=True), fromcurrent=True)]),
+            dict(label="⏸ 暫停", method="animate",
+                 args=[[None], dict(frame=dict(duration=0, redraw=False), mode="immediate")])
+        ])],
+        sliders=[dict(steps=[
+            dict(method="animate", args=[[f"f_{k}"], dict(mode="immediate", frame=dict(duration=0, redraw=True))],
+                 label=f"{anim_records[k][0]}格") for k in range(len(anim_records))])]
+    )
+    return fig
+
+
+# ─── 8. Gemini LLM 診斷報告生成 ────────────────────────────────────
+def generate_gemini_report(metrics_data) -> BaseballAnalysisReport:
+    if not HAS_GENAI:
+        raise RuntimeError("系統未能正確載入 google-genai 套件。")
+
+    api_key = st.secrets.get("AQ.Ab8RN6Jb7lpyB87mBqbDYTlVfF1v2WoFLHjptGOcSP-2AtbJPA", os.environ.get("AQ.Ab8RN6Jb7lpyB87mBqbDYTlVfF1v2WoFLHjptGOcSP-2AtbJPA"))
+    client = genai.Client(api_key=api_key) if api_key else genai.Client()
+
+    system_instruction = """
+  你是一位 MLB 級別的棒球生物力學專家與教練。
+  請根據傳入的 MediaPipe 3D 關節運動特徵（最大 X-Factor 角度、手腕峰值移動速度、前膝角度），
+  進行深度的運動機制診斷，指出潛在的能量流失瑕疵，並提供結構化的建議報告。
+  """
+
+    prompt_payload = {
+        "max_x_factor_degrees": metrics_data["max_x_factor"],
+        "max_wrist_speed_mph": metrics_data["max_wrist_speed_mph"],
+        "avg_knee_angle_degrees": metrics_data["avg_knee_angle"],
+        "total_analyzed_frames": len(metrics_data["frame_indices"])
+    }
+
+    prompt = f"請分析以下棒球運動生物力學數據並生成報告：\n```json\n{json.dumps(prompt_payload, indent=2)}\n```"
+
+    response = client.models.generate_content(
+        model="gemini-3.8-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            temperature=0.2,
+            response_mime_type="application/json",
+            response_schema=BaseballAnalysisReport,
+        ),
+    )
+
+    return BaseballAnalysisReport.model_validate_json(response.text)
+
+
+# ─── Streamlit UI 介面 ─────────────────────────────────────────────
+st.title("⚾ 棒球 3D 生物力學與 AI 診斷系統")
+st.markdown("結合 MediaPipe 3D 世界座標、 Kinematic 曲線分析與 Gemini 多模態 AI 診斷引擎。")
+
+st.sidebar.header("⚙️ 分析參數設定")
+tracked_joint_name = st.sidebar.selectbox(
+    "選擇追蹤關節", options=["右手腕 (16)", "左手腕 (15)", "右肘 (14)", "左肘 (13)"], index=0
+)
+joint_map = {"右手腕 (16)": 16, "左手腕 (15)": 15, "右肘 (14)": 14, "左肘 (13)": 13}
+tracked_joint = joint_map[tracked_joint_name]
+
+sample_step = st.sidebar.slider("抽格採樣間隔 (Sample Step)", 1, 5, 1)
+
+uploaded_file = st.sidebar.file_uploader("上傳影片 (MP4 / MOV)", type=["mp4", "mov", "avi"])
+
+if uploaded_file is not None:
+    video_bytes = uploaded_file.read()
+    suffix = os.path.splitext(uploaded_file.name)[1]
+
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        st.subheader("📹 原始影片")
+        st.video(video_bytes)
+
+    with col2:
+        st.subheader("🧊 3D 相對姿態與軌跡")
+        try:
+            records, fps, total_frames = analyze_video(video_bytes, suffix, sample_step)
+            if records:
+                metrics_data, poses_rel = compute_biomechanics_timeline(records, fps, tracked_joint)
+                fig_3d = make_3d_figure(records, poses_rel, tracked_joint)
+                if fig_3d:
+                    st.plotly_chart(fig_3d, use_container_width=True)
+
+                st.subheader("📈 生物力學特徵曲線 (X-Factor & Wrist Speed)")
+                fig_metrics = make_metrics_chart(metrics_data)
+                st.plotly_chart(fig_metrics, use_container_width=True)
+
+                st.subheader("🤖 Gemini 生物力學 AI 診斷報告")
+
+                if "gemini_report" not in st.session_state:
+                    st.session_state.gemini_report = None
+
+                if st.button("🚀 呼叫 Gemini AI 生成診斷報告", type="primary"):
+                    with st.spinner("Gemini API 分析動作機制中..."):
+                        try:
+                            st.session_state.gemini_report = generate_gemini_report(metrics_data)
+                        except Exception as err:
+                            st.error(f"Gemini 診斷失敗：{err}")
+
+                if st.session_state.gemini_report:
+                    report = st.session_state.gemini_report
+                    st.metric("綜合評分", f"{report.overall_score} / 100")
+                    st.info(f"**總結評語**：{report.summary}")
+
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.markdown(f"**扭力分析 (X-Factor)**：{report.peak_x_factor_eval}")
+                    with c2:
+                        st.markdown(f"**速度分析 (Speed)**：{report.wrist_speed_eval}")
+
+                    st.markdown("#### ⚠️ 檢測到的動作瑕疵")
+                    for issue in report.detected_issues:
+                        st.error(f"**[{issue.severity}風險] {issue.issue_name}**：{issue.analysis}")
+
+                    st.markdown("#### 🏋️ 推薦矯正菜單 (Drills)")
+                    for drill in report.recommended_drills:
+                        st.success(f"**{drill.drill_name}** ({drill.objective})\n\n說明：{drill.execution}")
+
+            else:
+                st.warning("影片中未能辨識出清晰的人體骨架。")
+        except Exception as e:
+            st.error(f"分析過程發生錯誤：{e}")
+else:
+    st.info("👈 請於左側邊欄上傳影片檔以開始分析。")
