@@ -1,5 +1,6 @@
-"""棒球 3D 姿態分析 + 生物力學曲線 + Gemini 診斷 (Tasks API 版)
-執行：streamlit run script77.py
+"""
+棒球 3D 生物力學與 AI 診斷系統 (單次 & 多次揮棒 3D 建模版)
+執行方式: streamlit run script77.py
 """
 import json
 import os
@@ -14,16 +15,15 @@ from plotly.subplots import make_subplots
 from pydantic import BaseModel, Field
 import streamlit as st
 
-# 確保 set_page_config 是第一個 Streamlit 命令
+# 1. 頁面初始化 (必須為第一個 Streamlit 命令)
 st.set_page_config(page_title="棒球 3D 生物力學診斷系統", page_icon="⚾", layout="wide")
 
-# Google GenAI 套件
+# Google GenAI 套件檢查
 try:
     from google import genai
     from google.genai import types
-
     HAS_GENAI = True
-except Exception as e:
+except Exception:
     HAS_GENAI = False
 
 BONES = [
@@ -33,11 +33,12 @@ BONES = [
 ]
 JOINTS = sorted(set(i for pair in BONES for i in pair))
 
-MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task"
-MODEL_PATH = "pose_landmarker_heavy.task"
+# 使用 Lite 輕量化模型
+MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
+MODEL_PATH = "pose_landmarker_lite.task"
 
 
-# ─── 1. Pydantic 診斷報告資料模型 ─────────────────────────────────
+# ─── Pydantic 診斷報告資料結構 ───────────────────────────────────────
 class DrillRecommendation(BaseModel):
     drill_name: str = Field(description="輔助訓練名稱")
     objective: str = Field(description="此訓練欲改善的動作瑕疵")
@@ -59,42 +60,34 @@ class BaseballAnalysisReport(BaseModel):
     recommended_drills: List[DrillRecommendation] = Field(description="推薦的矯正訓練菜單")
 
 
-# ─── 2. 模型檔案檢查 ───────────────────────────────────────────────
+# ─── 模型下載與快取 ───────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def ensure_model_file():
     if not os.path.exists(MODEL_PATH):
-        with st.spinner("首次執行，正在自動下載 MediaPipe 3D 姿態模型..."):
+        with st.spinner("首次執行，正在自動下載輕量化 3D 姿態估計模型..."):
             urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
     return MODEL_PATH
 
 
-# ─── 3. 運動生物力學幾何計算函式 ─────────────────────────────────
+# ─── 幾何與向量計算 ───────────────────────────────────────────────
 def calculate_angle_3d(a, b, c):
-    """計算三點 a-b-c 的 3D 夾角 (度)"""
     ba = a - b
     bc = c - b
     cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6)
-    angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
-    return np.degrees(angle)
+    return np.degrees(np.arccos(np.clip(cosine_angle, -1.0, 1.0)))
 
 
 def calculate_x_factor(pts):
-    """計算 3D 空間中髖連線向量與肩膀連線向量在 XY 平面的投影夾角 (X-Factor)"""
-    hip_vec = pts[24] - pts[23]  # 右髖 - 左髖
-    shoulder_vec = pts[12] - pts[11]  # 右肩 - 左肩
-
+    hip_vec = pts[24] - pts[23]
+    shoulder_vec = pts[12] - pts[11]
     hip_vec_2d = hip_vec[[0, 1]]
     shoulder_vec_2d = shoulder_vec[[0, 1]]
-
     unit_hip = hip_vec_2d / (np.linalg.norm(hip_vec_2d) + 1e-6)
     unit_shoulder = shoulder_vec_2d / (np.linalg.norm(shoulder_vec_2d) + 1e-6)
-
-    dot_prod = np.dot(unit_hip, unit_shoulder)
-    angle = np.degrees(np.arccos(np.clip(dot_prod, -1.0, 1.0)))
-    return angle
+    return np.degrees(np.arccos(np.clip(np.dot(unit_hip, unit_shoulder), -1.0, 1.0)))
 
 
-# ─── 4. 影片 3D 擷取與特徵數據計算 ─────────────────────────────────
+# ─── 影片分析與姿態擷取 ───────────────────────────────────────────
 @st.cache_data(show_spinner=False, max_entries=3)
 def analyze_video(video_bytes, suffix, sample_step):
     import mediapipe as mp
@@ -127,7 +120,7 @@ def analyze_video(video_bytes, suffix, sample_step):
             fps = float(read_fps)
 
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        progress = st.progress(0, text="分析影片與生物力學數據中…")
+        progress = st.progress(0, text="正在分析 3D 姿態與關節特徵…")
 
         index = 0
         try:
@@ -137,6 +130,11 @@ def analyze_video(video_bytes, suffix, sample_step):
                     break
 
                 if index % sample_step == 0:
+                    h, w = frame.shape[:2]
+                    if w > 640:
+                        new_h = int(h * (640 / w))
+                        frame = cv2.resize(frame, (640, new_h), interpolation=cv2.INTER_NEAREST)
+
                     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
                     timestamp_ms = int((index / fps) * 1000)
@@ -150,8 +148,8 @@ def analyze_video(video_bytes, suffix, sample_step):
                             records.append((index, pts))
 
                 index += 1
-                if total > 0 and index % 15 == 0:
-                    progress.progress(min(index / total, 1.0), text=f"已處理 {index} 格")
+                if total > 0 and index % 30 == 0:
+                    progress.progress(min(index / total, 1.0), text=f"已加速處理 {index}/{total} 格")
         finally:
             landmarker.close()
             progress.empty()
@@ -167,7 +165,7 @@ def analyze_video(video_bytes, suffix, sample_step):
             os.remove(path)
 
 
-# ─── 5. 計算時間軸生物力學指標 (Metrics Timeline) ─────────────────
+# ─── 時間軸生物力學指標計算 ───────────────────────────────────────
 def compute_biomechanics_timeline(records, fps, tracked_joint):
     frame_indices = [r[0] for r in records]
     time_sec = np.array(frame_indices) / fps
@@ -184,7 +182,6 @@ def compute_biomechanics_timeline(records, fps, tracked_joint):
     vel_vectors = np.diff(traj, axis=0) / dt
     speeds = np.linalg.norm(vel_vectors, axis=1)
     speeds = np.insert(speeds, 0, 0.0)
-
     speeds_mph = speeds * 2.23694
 
     metrics_data = {
@@ -200,96 +197,131 @@ def compute_biomechanics_timeline(records, fps, tracked_joint):
     return metrics_data, poses_rel
 
 
-# ─── 6. 繪製生物力學折線圖 ─────────────────────────────────────────
+# ─── 自動揮棒事件分割 (Swings Segmentation) ──────────────────────────
+def segment_swings(metrics_data, fps, window_sec=1.0):
+    speeds = metrics_data["speeds_mph"]
+    times = metrics_data["time_sec"]
+
+    threshold = np.mean(speeds) + 1.2 * np.std(speeds)
+    peak_indices = []
+
+    for i in range(1, len(speeds) - 1):
+        if speeds[i] > threshold and speeds[i] > speeds[i - 1] and speeds[i] > speeds[i + 1]:
+            if not peak_indices or (times[i] - times[peak_indices[-1]]) > 1.2:
+                peak_indices.append(i)
+
+    if not peak_indices:
+        return [{"name": "🌐 全景整段影片 (全揮棒)", "start_idx": 0, "end_idx": len(times) - 1, "peak_idx": int(np.argmax(speeds))}]
+
+    window_frames = int(window_sec * fps)
+    swings = [{"name": "🌐 全景整段影片 (含多次揮棒)", "start_idx": 0, "end_idx": len(times) - 1, "peak_idx": int(np.argmax(speeds))}]
+
+    for idx, p_idx in enumerate(peak_indices):
+        start_idx = max(0, p_idx - int(window_frames * 0.4))
+        end_idx = min(len(times) - 1, p_idx + int(window_frames * 0.6))
+        peak_time = times[p_idx]
+        swings.append({
+            "name": f"🎯 單次揮棒 #{idx + 1} (擊球峰值時間: {peak_time:.2f}秒)",
+            "start_idx": start_idx,
+            "end_idx": end_idx,
+            "peak_idx": p_idx
+        })
+
+    return swings
+
+
+# ─── 繪製 2D 運動力學曲線 ─────────────────────────────────────────
 def make_metrics_chart(metrics_data):
     fig = make_subplots(
         rows=2, cols=1,
         shared_xaxes=True,
-        subplot_titles=("髖肩分離度 (X-Factor Sequence)", "追蹤關節 3D 移動速度 (Wrist/Elbow Speed)")
+        subplot_titles=("髖肩分離度 (X-Factor Sequence)", "追蹤關節 3D 移動速度 (Speed MPH)")
     )
-
     fig.add_trace(
-        go.Scatter(
-            x=metrics_data["time_sec"],
-            y=metrics_data["x_factors"],
-            mode="lines+markers",
-            name="X-Factor (度)",
-            line=dict(color="#00d8d6", width=3)
-        ),
+        go.Scatter(x=metrics_data["time_sec"], y=metrics_data["x_factors"], mode="lines+markers", name="X-Factor (°)", line=dict(color="#00d8d6", width=3)),
         row=1, col=1
     )
-
     fig.add_trace(
-        go.Scatter(
-            x=metrics_data["time_sec"],
-            y=metrics_data["speeds_mph"],
-            mode="lines+markers",
-            name="速度 (mph)",
-            line=dict(color="#ffdd59", width=3)
-        ),
+        go.Scatter(x=metrics_data["time_sec"], y=metrics_data["speeds_mph"], mode="lines+markers", name="速度 (mph)", line=dict(color="#ffdd59", width=3)),
         row=2, col=1
     )
-
     fig.update_layout(
-        paper_bgcolor="#1e272e",
-        plot_bgcolor="#2d3436",
-        font=dict(color="#ffffff"),
-        height=400,
-        margin=dict(l=20, r=20, t=40, b=20),
-        showlegend=False
+        paper_bgcolor="#1e272e", plot_bgcolor="#2d3436", font=dict(color="#ffffff"),
+        height=400, margin=dict(l=20, r=20, t=40, b=20), showlegend=False
     )
     fig.update_xaxes(title_text="時間 (秒)", gridcolor="#485460", row=2, col=1)
     fig.update_yaxes(title_text="角度 (°)", gridcolor="#485460", row=1, col=1)
     fig.update_yaxes(title_text="速度 (mph)", gridcolor="#485460", row=2, col=1)
-
     return fig
 
 
-# ─── 7. 3D 骨架與軌跡圖表 ──────────────────────────────────────────
-def make_3d_figure(records, poses_rel, tracked_joint, animation_limit=240):
+# ─── 繪製 3D 骨架與球棒揮擊扇形面 (Bat Swept Surface) ───────────────
+def make_3d_figure(records, poses_rel, tracked_joint, animation_limit=240, bat_length=0.85):
     stride = max(1, int(np.ceil(len(records) / animation_limit)))
     anim_records = records[::stride]
     anim_poses = poses_rel[::stride]
-    trajectory = poses_rel[:, tracked_joint, :]
-    anim_trajectory = trajectory[::stride]
+
+    wrist_idx = 16 if tracked_joint in [16, 14] else 15
+    elbow_idx = 14 if tracked_joint in [16, 14] else 13
+
+    wrist_traj = poses_rel[:, wrist_idx, :]
+    elbow_traj = poses_rel[:, elbow_idx, :]
+
+    bat_vecs = wrist_traj - elbow_traj
+    bat_vecs = bat_vecs / (np.linalg.norm(bat_vecs, axis=1, keepdims=True) + 1e-6)
+    tip_traj = wrist_traj + bat_vecs * bat_length
+
+    num_frames = len(wrist_traj)
+    num_segments = 10
+    s = np.linspace(0, 1, num_segments)
+    surf_X = np.zeros((num_frames, num_segments))
+    surf_Y = np.zeros((num_frames, num_segments))
+    surf_Z = np.zeros((num_frames, num_segments))
+
+    for t in range(num_frames):
+        for idx_s, val_s in enumerate(s):
+            pt = (1 - val_s) * wrist_traj[t] + val_s * tip_traj[t]
+            surf_X[t, idx_s] = pt[0]
+            surf_Y[t, idx_s] = pt[1]
+            surf_Z[t, idx_s] = pt[2]
 
     fig = go.Figure()
+
+    # 3D 半透明揮棒扇形面
+    fig.add_trace(go.Surface(
+        x=surf_X, y=surf_Y, z=surf_Z,
+        colorscale="Viridis", opacity=0.6, showscale=False, name="揮棒軌跡扇形面"
+    ))
+    fig.add_trace(go.Scatter3d(x=wrist_traj[:, 0], y=wrist_traj[:, 1], z=wrist_traj[:, 2], mode="lines", line=dict(color="#00d8d6", width=3), name="手腕軌跡"))
+    fig.add_trace(go.Scatter3d(x=tip_traj[:, 0], y=tip_traj[:, 1], z=tip_traj[:, 2], mode="lines", line=dict(color="#ffdd59", width=4), name="棒頭軌跡 (扇形外緣)"))
+
     init_pose = anim_poses[0]
-
-    fig.add_trace(go.Scatter3d(
-        x=trajectory[:, 0], y=trajectory[:, 1], z=trajectory[:, 2],
-        mode="lines", line=dict(color="#00d8d6", width=4, dash="dash"),
-        name="完整空間軌跡"
-    ))
-
     init_joints = init_pose[JOINTS]
-    fig.add_trace(go.Scatter3d(
-        x=init_joints[:, 0], y=init_joints[:, 1], z=init_joints[:, 2],
-        mode="markers", marker=dict(size=5, color="#ff5e57"), name="關節點"
-    ))
+    fig.add_trace(go.Scatter3d(x=init_joints[:, 0], y=init_joints[:, 1], z=init_joints[:, 2], mode="markers", marker=dict(size=5, color="#ff5e57"), name="關節點"))
 
     for p1_idx, p2_idx in BONES:
         p1, p2 = init_pose[p1_idx], init_pose[p2_idx]
-        fig.add_trace(go.Scatter3d(
-            x=[p1[0], p2[0]], y=[p1[1], p2[1]], z=[p1[2], p2[2]],
-            mode="lines", line=dict(color="#ffffff", width=4), showlegend=False
-        ))
+        fig.add_trace(go.Scatter3d(x=[p1[0], p2[0]], y=[p1[1], p2[1]], z=[p1[2], p2[2]], mode="lines", line=dict(color="#ffffff", width=4), showlegend=False))
 
     anim_frames = []
+    anim_wrist = wrist_traj[::stride]
+    anim_tip = tip_traj[::stride]
+
     for idx, (frame_data, pose_pts) in enumerate(zip(anim_records, anim_poses)):
-        curr_traj = anim_trajectory[: idx + 1]
         curr_joints = pose_pts[JOINTS]
+        w_pt = anim_wrist[idx]
+        t_pt = anim_tip[idx]
 
         frame_traces = [
-            go.Scatter3d(x=curr_traj[:, 0], y=curr_traj[:, 1], z=curr_traj[:, 2], mode="lines",
-                         line=dict(color="#00d8d6", width=6)),
-            go.Scatter3d(x=curr_joints[:, 0], y=curr_joints[:, 1], z=curr_joints[:, 2], mode="markers",
-                         marker=dict(size=6, color="#ff3838"))
+            go.Surface(x=surf_X, y=surf_Y, z=surf_Z, colorscale="Viridis", opacity=0.6, showscale=False),
+            go.Scatter3d(x=wrist_traj[:, 0], y=wrist_traj[:, 1], z=wrist_traj[:, 2], mode="lines", line=dict(color="#00d8d6", width=3)),
+            go.Scatter3d(x=tip_traj[:, 0], y=tip_traj[:, 1], z=tip_traj[:, 2], mode="lines", line=dict(color="#ffdd59", width=4)),
+            go.Scatter3d(x=curr_joints[:, 0], y=curr_joints[:, 1], z=curr_joints[:, 2], mode="markers", marker=dict(size=6, color="#ff3838")),
+            go.Scatter3d(x=[w_pt[0], t_pt[0]], y=[w_pt[1], t_pt[1]], z=[w_pt[2], t_pt[2]], mode="lines", line=dict(color="#ffdd59", width=8))
         ]
         for p1_idx, p2_idx in BONES:
             p1, p2 = pose_pts[p1_idx], pose_pts[p2_idx]
-            frame_traces.append(go.Scatter3d(x=[p1[0], p2[0]], y=[p1[1], p2[1]], z=[p1[2], p2[2]], mode="lines",
-                                             line=dict(color="#ffffff", width=4)))
+            frame_traces.append(go.Scatter3d(x=[p1[0], p2[0]], y=[p1[1], p2[1]], z=[p1[2], p2[2]], mode="lines", line=dict(color="#ffffff", width=4)))
 
         anim_frames.append(go.Frame(data=frame_traces, name=f"f_{idx}"))
 
@@ -302,31 +334,26 @@ def make_3d_figure(records, poses_rel, tracked_joint, animation_limit=240):
             zaxis=dict(title="高度 (Z)", backgroundcolor="#2d3436", gridcolor="#485460"),
             aspectmode="data", camera=dict(eye=dict(x=1.5, y=-1.5, z=0.8))
         ),
-        margin=dict(l=0, r=0, b=0, t=30), height=550,
+        margin=dict(l=0, r=0, b=0, t=30), height=600,
         updatemenus=[dict(type="buttons", showactive=False, y=0.05, x=0.05, buttons=[
-            dict(label="▶ 播放 3D 動作", method="animate",
-                 args=[None, dict(frame=dict(duration=40, redraw=True), fromcurrent=True)]),
-            dict(label="⏸ 暫停", method="animate",
-                 args=[[None], dict(frame=dict(duration=0, redraw=False), mode="immediate")])
-        ])],
-        sliders=[dict(steps=[
-            dict(method="animate", args=[[f"f_{k}"], dict(mode="immediate", frame=dict(duration=0, redraw=True))],
-                 label=f"{anim_records[k][0]}格") for k in range(len(anim_records))])]
+            dict(label="▶ 播放 3D 揮棒", method="animate", args=[None, dict(frame=dict(duration=40, redraw=True), fromcurrent=True)]),
+            dict(label="⏸ 暫停", method="animate", args=[[None], dict(frame=dict(duration=0, redraw=False), mode="immediate")])
+        ])]
     )
     return fig
 
 
-# ─── 8. Gemini LLM 診斷報告生成 ────────────────────────────────────
+# ─── Gemini AI 診斷生成 ───────────────────────────────────────────
 def generate_gemini_report(metrics_data) -> BaseballAnalysisReport:
     if not HAS_GENAI:
         raise RuntimeError("系統未能正確載入 google-genai 套件。")
 
-    api_key = st.secrets.get("AQ.Ab8RN6Jb7lpyB87mBqbDYTlVfF1v2WoFLHjptGOcSP-2AtbJPA", os.environ.get("AQ.Ab8RN6Jb7lpyB87mBqbDYTlVfF1v2WoFLHjptGOcSP-2AtbJPA"))
+    api_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY"))
     client = genai.Client(api_key=api_key) if api_key else genai.Client()
 
     system_instruction = """
   你是一位 MLB 級別的棒球生物力學專家與教練。
-  請根據傳入的 MediaPipe 3D 關節運動特徵（最大 X-Factor 角度、手腕峰值移動速度、前膝角度），
+  請根據傳入的 3D 關節數據（最大 X-Factor 角度、手腕峰值移動速度、前膝角度），
   進行深度的運動機制診斷，指出潛在的能量流失瑕疵，並提供結構化的建議報告。
   """
 
@@ -349,18 +376,15 @@ def generate_gemini_report(metrics_data) -> BaseballAnalysisReport:
             response_schema=BaseballAnalysisReport,
         ),
     )
-
     return BaseballAnalysisReport.model_validate_json(response.text)
 
 
-# ─── Streamlit UI 介面 ─────────────────────────────────────────────
+# ─── Streamlit 主 UI 介面 ───────────────────────────────────────────
 st.title("⚾ 棒球 3D 生物力學與 AI 診斷系統")
-st.markdown("結合 MediaPipe 3D 世界座標、 Kinematic 曲線分析與 Gemini 多模態 AI 診斷引擎。")
+st.markdown("結合 MediaPipe 3D 世界座標、 Kinematic 曲線分析、單次/多次 3D 揮棒建模與 Gemini AI 診斷引擎。")
 
 st.sidebar.header("⚙️ 分析參數設定")
-tracked_joint_name = st.sidebar.selectbox(
-    "選擇追蹤關節", options=["右手腕 (16)", "左手腕 (15)", "右肘 (14)", "左肘 (13)"], index=0
-)
+tracked_joint_name = st.sidebar.selectbox("選擇追蹤關節", options=["右手腕 (16)", "左手腕 (15)", "右肘 (14)", "左肘 (13)"], index=0)
 joint_map = {"右手腕 (16)": 16, "左手腕 (15)": 15, "右肘 (14)": 14, "左肘 (13)": 13}
 tracked_joint = joint_map[tracked_joint_name]
 
@@ -379,21 +403,34 @@ if uploaded_file is not None:
         st.video(video_bytes)
 
     with col2:
-        st.subheader("🧊 3D 相對姿態與軌跡")
         try:
             records, fps, total_frames = analyze_video(video_bytes, suffix, sample_step)
             if records:
                 metrics_data, poses_rel = compute_biomechanics_timeline(records, fps, tracked_joint)
-                fig_3d = make_3d_figure(records, poses_rel, tracked_joint)
+
+                # 切割揮棒動作選單
+                swings = segment_swings(metrics_data, fps)
+                st.subheader("🧊 3D 姿勢與揮棒軌跡建模")
+
+                selected_swing_name = st.selectbox(
+                    "🎯 選擇 3D 建模視角 (支援單次揮棒與全景多次揮棒)：",
+                    options=[s["name"] for s in swings]
+                )
+                selected_swing = next(s for s in swings if s["name"] == selected_swing_name)
+
+                # 裁切出對應的揮棒片段進行 3D 繪製
+                sub_records = records[selected_swing["start_idx"]: selected_swing["end_idx"] + 1]
+                sub_poses = poses_rel[selected_swing["start_idx"]: selected_swing["end_idx"] + 1]
+
+                fig_3d = make_3d_figure(sub_records, sub_poses, tracked_joint)
                 if fig_3d:
                     st.plotly_chart(fig_3d, use_container_width=True)
 
-                st.subheader("📈 生物力學特徵曲線 (X-Factor & Wrist Speed)")
+                st.subheader("📈 生物力學特徵曲線 (X-Factor & Speed)")
                 fig_metrics = make_metrics_chart(metrics_data)
                 st.plotly_chart(fig_metrics, use_container_width=True)
 
                 st.subheader("🤖 Gemini 生物力學 AI 診斷報告")
-
                 if "gemini_report" not in st.session_state:
                     st.session_state.gemini_report = None
 
@@ -422,7 +459,6 @@ if uploaded_file is not None:
                     st.markdown("#### 🏋️ 推薦矯正菜單 (Drills)")
                     for drill in report.recommended_drills:
                         st.success(f"**{drill.drill_name}** ({drill.objective})\n\n說明：{drill.execution}")
-
             else:
                 st.warning("影片中未能辨識出清晰的人體骨架。")
         except Exception as e:
