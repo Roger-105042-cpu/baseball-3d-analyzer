@@ -3,5 +3,5 @@ opencv-python-headless
 mediapipe
 numpy
 plotly
-google-genai
+google-generativeai
 pydantic
